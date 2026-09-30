@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 import duckdb
+import pandas as pd
 
 ROOT = Path(__file__).parent
 RAW = ROOT / "data" / "raw"
@@ -39,6 +40,20 @@ def columns(sq: sqlite3.Connection, table: str) -> list[str]:
     return [r[1] for r in sq.execute(f"PRAGMA table_info({table})")]
 
 
+def primary_key(sq: sqlite3.Connection, table: str) -> list[str]:
+    rows = sorted((r[5], r[1]) for r in sq.execute(f"PRAGMA table_info({table})") if r[5])
+    return [name for _, name in rows]
+
+
+def load_column_description(sq: sqlite3.Connection) -> None:
+    # The file mixes encodings, which DuckDB's strict reader rejects.
+    df = pd.read_csv(RAW / "HomeCredit_columns_description.csv", encoding="cp1252", index_col=0)
+    sq.executemany("INSERT INTO column_description VALUES (?, ?, ?, ?)",
+                   df[["Table", "Row", "Description", "Special"]].itertuples(index=False))
+    sq.commit()
+    print(f"{'column_description':28s} {len(df):>12,} rows")
+
+
 def main() -> None:
     DB_PATH.unlink(missing_ok=True)
     sq = sqlite3.connect(DB_PATH)
@@ -60,7 +75,11 @@ def main() -> None:
         t0 = time.time()
         cols = cols or columns(sq, table)
         col_list = ", ".join(f'"{c}"' for c in cols)
-        dk.execute(f"INSERT INTO db.{table} ({col_list}) SELECT {col_list} FROM {source}")
+        # Inserting in primary-key order keeps SQLite's B-tree appends sequential;
+        # unordered inserts into the WITHOUT ROWID tables are many times slower.
+        pk = [c for c in primary_key(sq, table) if c != "id"]
+        order = f" ORDER BY {', '.join(pk)}" if pk else ""
+        dk.execute(f"INSERT INTO db.{table} ({col_list}) SELECT {col_list} FROM {source}{order}")
         n = sq.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
         print(f"{table:28s} {n:>12,} rows  {time.time() - t0:6.1f}s", flush=True)
 
@@ -72,13 +91,8 @@ def main() -> None:
         cols = [c for c in columns(sq, t) if c != "id"]
         load(t, csv(f), cols)
 
-    dk.execute(f"""
-        INSERT INTO db.column_description
-        SELECT "Table", "Row", "Description", "Special"
-        FROM read_csv('{(RAW / 'HomeCredit_columns_description.csv').as_posix()}',
-                      header=true, encoding='latin-1')
-    """)
     dk.close()
+    load_column_description(sq)
 
     print("building indexes ...", flush=True)
     sq.executescript((ROOT / "indexes.sql").read_text())
