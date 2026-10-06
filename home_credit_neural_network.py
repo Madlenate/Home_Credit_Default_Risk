@@ -51,6 +51,13 @@ def prepare_features(df):
     df["NO_EMPLOYER"] = (df["DAYS_EMPLOYED"] == NO_EMPLOYER_PLACEHOLDER).astype(int)
     df["DAYS_EMPLOYED"] = df["DAYS_EMPLOYED"].replace(NO_EMPLOYER_PLACEHOLDER, np.nan)
 
+    df["CREDIT_INCOME_RATIO"] = df["AMT_CREDIT"] / df["AMT_INCOME_TOTAL"]
+    df["ANNUITY_INCOME_RATIO"] = df["AMT_ANNUITY"] / df["AMT_INCOME_TOTAL"]
+    df["CREDIT_TERM"] = df["AMT_ANNUITY"] / df["AMT_CREDIT"]
+    df["GOODS_CREDIT_RATIO"] = df["AMT_GOODS_PRICE"] / df["AMT_CREDIT"]
+    df["AGE_YEARS"] = -df["DAYS_BIRTH"] / 365.25
+    df["EMPLOYED_AGE_RATIO"] = df["DAYS_EMPLOYED"] / df["DAYS_BIRTH"]
+
     y = None
     if "TARGET" in df.columns and df["TARGET"].notna().all():
         y = df["TARGET"].astype(int)
