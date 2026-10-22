@@ -4,7 +4,7 @@
 For one applicant, let their history records be indexed by $j = 1, \dots, n$ (payments, card-months or loans).
 
 - $t_j$ = when record $j$ happened, relative to the application date (negative = in the past)
-  - installments: $t_j$ = `DAYS_INSTALMENT` (days)
+  - installments: $t_j$ = `DAYS_INSTALMENT` (days). Partial payments of the same installment are added together first, so each $j$ is one installment: paid amount = sum of its parts, paid day = day of the last part
   - credit card: $t_j$ = `MONTHS_BALANCE` (months, $-1$ = most recent month)
 - $W$ = a time window, e.g. "last 6 months" = $\{\, j : t_j \ge -180 \,\}$
 - $\mathbb{1}[\cdot]$ = indicator: 1 if the condition is true, 0 otherwise
@@ -44,21 +44,22 @@ $$\text{min-only}_W = \frac{1}{n_W} \sum_{j \in W} \mathbb{1}[\, \text{paid}_j \
 **All-time** summaries are the same formulas with $W$ = all records.
 
 ### 2. Change (trend) features
-A trend compares recent behaviour with the applicant's **own** all-time behaviour:
+A trend compares recent behaviour with the applicant's **own** behaviour before that window (the two periods do not overlap):
 
-$$\text{trend}_W = \text{rate}_W - \text{rate}_{\text{all}}$$
+$$\text{trend}_W = \text{rate}_W - \text{rate}_{\text{before } W}$$
 
-- $\text{trend} > 0$: worse recently than usual
-- $\text{trend} < 0$: better recently than usual
+- $\text{trend} > 0$: worse recently than before
+- $\text{trend} < 0$: better recently than before
 - $\text{trend} \approx 0$: steady
+- `NaN`: no records in the recent window, or none before it (nothing to compare)
 
 | Feature | Recent window $W$ | Formula |
 |---|---|---|
-| `inst_late_trend_6m` | last 180 days | $\text{rate}_{6m} - \text{rate}_{\text{all}}$ |
-| `inst_late_trend_12m` | last 365 days | $\text{rate}_{12m} - \text{rate}_{\text{all}}$ |
-| `inst_days_late_trend_12m` | last 365 days | $\text{days late}_{12m} - \text{days late}_{\text{all}}$ |
-| `cc_util_trend_3m` | last 3 months | $u_{3m} - u_{\text{all}}$ |
-| `cc_dpd_trend_12m` | last 12 months | $\text{rate}^{\text{DPD}}_{12m} - \text{rate}^{\text{DPD}}_{\text{all}}$ |
+| `inst_late_trend_6m` | last 180 days | $\text{rate}_{6m} - \text{rate}_{\text{before 6m}}$ |
+| `inst_late_trend_12m` | last 365 days | $\text{rate}_{12m} - \text{rate}_{\text{before 12m}}$ |
+| `inst_days_late_trend_12m` | last 365 days | $\text{days late}_{12m} - \text{days late}_{\text{before 12m}}$ |
+| `cc_util_trend_3m` | last 3 months | $u_{3m} - u_{\text{before 3m}}$ |
+| `cc_dpd_trend_12m` | last 12 months | $\text{rate}^{\text{DPD}}_{12m} - \text{rate}^{\text{DPD}}_{\text{before 12m}}$ |
 
 **Change ratios** compare two periods by division (1 = no change):
 
@@ -67,7 +68,7 @@ $$\text{change ratio} = \frac{\text{average in recent period}}{\text{average in 
 | Feature | Recent period | Earlier period |
 |---|---|---|
 | `inst_payment_change_ratio` | payments in last 12 months | payments before that |
-| `cc_drawings_change_ratio` | drawings in last 3 months | all-time average |
+| `cc_drawings_change_ratio` | drawings in last 3 months | months before the last 3 |
 | `prev_applied_change_ratio` | applications in last 2 years | applications before that |
 
 **Balance change** (in money, not a ratio):
@@ -96,21 +97,42 @@ $$\text{INCOME\_LEFT\_PER\_PERSON} = \frac{\text{income} - \text{annuity}}{\text
 
 Every division uses a safe denominator: if it is 0, the result is `NaN` instead of an error (`NULLIF(x, 0)` in SQL).
 
-### 5. How applicants are labelled in the sanity check
+### 5. Outside credit scores (EXT_SOURCE)
+Let $e_1, e_2, e_3$ be `EXT_SOURCE_1/2/3` and $E$ the set of scores the applicant actually has ($|E|$ = 0 to 3).
+
+$$\text{EXT\_MEAN} = \frac{1}{|E|} \sum_{k \in E} e_k
+\qquad
+\text{EXT\_MIN} = \min_{k \in E} e_k
+\qquad
+\text{EXT\_MAX} = \max_{k \in E} e_k$$
+
+$$\text{EXT\_STD} = \sqrt{\frac{1}{|E| - 1} \sum_{k \in E} (e_k - \text{EXT\_MEAN})^2}
+\qquad
+\text{EXT\_PROD} = e_1 \, e_2 \, e_3$$
+
+$$\text{EXT\_N\_MISSING} = 3 - |E|
+\qquad
+\text{EXT\_MEAN\_X\_CREDIT\_TERM} = \text{EXT\_MEAN} \times \frac{\text{annuity}}{\text{credit}}$$
+
+- `EXT_STD` needs at least 2 scores and `EXT_PROD` needs all 3; otherwise they are `NaN`.
+- `EXT_MEAN` gives every applicant with at least one score a single combined score, even when some are missing.
+- `EXT_MEAN × AGE` is deliberately left out, so the features do not add more age signal.
+
+### 6. How applicants are labelled in the sanity check
 Each trend feature is split into four groups using a **±0.05 threshold** (5 percentage points):
 
 | Label | Rule | Meaning |
 |---|---|---|
-| **Improving** | $\text{trend} < -0.05$ | Recent rate is more than 5 points **better** than their usual |
-| **Steady** | $-0.05 \le \text{trend} \le 0.05$ | Within 5 points of their usual |
-| **Worsening** | $\text{trend} > 0.05$ | Recent rate is more than 5 points **worse** than their usual |
-| **No recent data** | trend is `NaN` | Nothing happened in the recent window |
+| **Improving** | $\text{trend} < -0.05$ | Recent rate is more than 5 points **better** than before the window |
+| **Steady** | $-0.05 \le \text{trend} \le 0.05$ | Within 5 points of before the window |
+| **Worsening** | $\text{trend} > 0.05$ | Recent rate is more than 5 points **worse** than before the window |
+| **No recent data** | trend is `NaN` | No records in the recent window, or none before it |
 
-Example: an applicant late on 4% of all payments but 15% of payments in the last 6 months has $\text{trend} = 0.15 - 0.04 = 0.11 > 0.05$, so they are labelled **worsening**.
+Example: an applicant late on 4% of payments before the last 6 months but 15% of payments in the last 6 months has $\text{trend} = 0.15 - 0.04 = 0.11 > 0.05$, so they are labelled **worsening**.
 
 The ±0.05 threshold is a judgement call, chosen so that small random variation counts as "steady". It only affects this summary table; the models use the raw trend values.
 
-### 6. Single-feature AUC
+### 7. Single-feature AUC
 For each feature, AUC is computed on applicants who have a value:
 
 $$\text{AUC} = P(\, x_{\text{defaulter}} > x_{\text{repayer}} \,)$$
